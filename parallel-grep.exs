@@ -18,7 +18,7 @@ end
 
 defmodule FileGrepper do
         def grep_file(file_path, regex, pid) do
-                File.stream!(file_path)
+                File.stream!(file_path, [:read, :compressed])
                 |> Stream.filter(line_matches(regex))
                 |> Stream.map( &send_line(pid, &1) )
                 |> Stream.run
