@@ -19,8 +19,9 @@ end
 defmodule FileGrepper do
         def grep_file(file_path, regex, pid, options) do
                 File.stream!(file_path, [:read, :compressed])
+                |> Stream.with_index
                 |> Stream.filter( line_matches(regex, options) )
-                |> Stream.map( &send_line(pid, &1) )
+                |> Stream.map( &send_line(pid, file_path, options, &1) )
                 |> Stream.run
         end
 
@@ -32,14 +33,29 @@ defmodule FileGrepper do
                                 []
                         end
 
-                fn(line) ->
+                fn({line, _index}) ->
                         {:ok, regex_compiled} = Regex.compile(regex, regex_options)
                         Regex.match?(regex_compiled, line)
                 end
         end
 
-        defp send_line(pid, line) do
-                send(pid, {:line, line})
+        defp send_line(pid, file_path, options, {line, index}) do
+                filename_prefix =
+                        if Enum.member?(options, {:filename, true}) do
+                                "#{file_path}:"
+                        else
+                                ""
+                        end
+
+                line_number_prefix =
+                        if Enum.member?(options, {:line_number, true}) do
+                                "#{index + 1}:"
+                        else
+                                ""
+                        end
+
+                send_line = "#{filename_prefix}#{line_number_prefix}#{line}"
+                send(pid, {:line, send_line})
         end
 end
 
@@ -121,7 +137,7 @@ end
 file_list = ParallelGrep.ls_r()
 
 {parsed, [regex | _], _error} = OptionParser.parse(System.argv,
-                                            aliases: [i: :ignore_case],
-                                            switches: [ignore_case: :boolean])
+                                        aliases: [i: :ignore_case, f: :filename, n: :line_number],
+                                        switches: [ignore_case: :boolean, filename: :boolean, line_number: :boolean])
 
 ProcessManager.start(file_list, regex, parsed)
