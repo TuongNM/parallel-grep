@@ -17,16 +17,23 @@ defmodule ParallelGrep do
 end
 
 defmodule FileGrepper do
-        def grep_file(file_path, regex, pid) do
+        def grep_file(file_path, regex, pid, options) do
                 File.stream!(file_path, [:read, :compressed])
-                |> Stream.filter(line_matches(regex))
+                |> Stream.filter( line_matches(regex, options) )
                 |> Stream.map( &send_line(pid, &1) )
                 |> Stream.run
         end
 
-        defp line_matches(regex) do
+        defp line_matches(regex, options) do
+                regex_options =
+                        if Enum.member?(options, {:ignore_case, true}) do
+                                [:caseless]
+                        else
+                                []
+                        end
+
                 fn(line) ->
-                        {:ok, regex_compiled} = Regex.compile(regex, [:caseless])
+                        {:ok, regex_compiled} = Regex.compile(regex, regex_options)
                         Regex.match?(regex_compiled, line)
                 end
         end
@@ -37,22 +44,22 @@ defmodule FileGrepper do
 end
 
 defmodule FileGrepper.Process do
-        def start(pid, regex) do
+        def start(pid, regex, options) do
                 send( pid, {:next, self()} )
-                loop(pid, regex)
+                loop(pid, regex, options)
         end
 
-        defp loop(pid, regex) do
+        defp loop(pid, regex, options) do
                 receive do
                         {:file, file_path} ->
-                                FileGrepper.grep_file(file_path, regex, pid)
+                                FileGrepper.grep_file(file_path, regex, pid, options)
                                 send( pid, {:next, self()} )
 
-                                loop(pid, regex)
+                                loop(pid, regex, options)
                         :finish ->
                                 send(pid, :finish)
                         _message ->
-                                loop(pid, regex)
+                                loop(pid, regex, options)
                 end
         end
 end
@@ -60,12 +67,12 @@ end
 defmodule ProcessManager do
         @max_processes 100
 
-        def start(file_list, regex) do
+        def start(file_list, regex, options) do
                 manager = self()
                 process_list =
                         Enum.map(1..@max_processes, fn(_) ->
                                 spawn(fn ->
-                                        FileGrepper.Process.start(manager, regex)
+                                        FileGrepper.Process.start(manager, regex, options)
                                 end)
                         end)
 
@@ -111,8 +118,10 @@ defmodule ProcessManager do
         end
 end
 
-[regex | _] = System.argv
-
 file_list = ParallelGrep.ls_r()
 
-ProcessManager.start(file_list, regex)
+{parsed, [regex | _], _error} = OptionParser.parse(System.argv,
+                                            aliases: [i: :ignore_case],
+                                            switches: [ignore_case: :boolean])
+
+ProcessManager.start(file_list, regex, parsed)
