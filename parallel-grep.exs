@@ -17,12 +17,82 @@ defmodule ParallelGrep do
 end
 
 defmodule FileGrepper do
+        @max_processes 4
+
         def grep_file(file_path, regex, pid, options) do
+                number_of_lines = count_lines(file_path)
+                chunks = Integer.floor_div(number_of_lines, @max_processes)
+
+                {line_breaks, _start} =
+                        for n <- 1..@max_processes-1 do
+                                n * chunks
+                        end ++ [number_of_lines]
+                        |> Enum.reduce(
+                                {[], 1},
+                                fn(line, {list, start}) ->
+                                        break_tuple = {start, line}
+                                        {[break_tuple | list], line + 1}
+                                end
+                        )
+
+                finish_pid = self()
+                process_list = Enum.map(line_breaks, fn({line_start, line_end}) ->
+                        spawn(fn ->
+                                grep_file_path(file_path, regex, pid, options, 1, line_start, line_end, finish_pid)
+                        end)
+                end)
+
+                grep_file_loop( length(process_list) )
+        end
+
+        defp grep_file_loop(0) do
+                :ok
+        end
+
+        defp grep_file_loop(n) do
+                receive do
+                        :finish -> grep_file_loop(n - 1)
+                        _message -> grep_file_loop(n)
+                end
+        end
+
+        defp grep_file_path(file_path, regex, pid, options, line_number, line_start, line_end, finish_pid) do
+                {:ok, file_pointer} = File.open(file_path, [:read, :compressed])
+
+                grep_file_pointer(file_pointer, file_path, regex, pid, options, line_number, line_start, line_end, finish_pid)
+
+                File.close(file_pointer)
+                send(finish_pid, :finish)
+        end
+
+        defp grep_file_pointer(file_pointer, file_path, regex, pid, options, line_number, line_start, line_end, finish_pid) do
+                case IO.read(file_pointer, :line) do
+                        :eof -> :ok
+                        line ->
+                                cond do
+                                        line_number < line_start ->
+                                                grep_file_pointer(file_pointer, file_path, regex, pid, options, line_number + 1, line_start, line_end, finish_pid)
+
+                                        line_number > line_end -> :ok
+
+                                        true ->
+                                                if line_matches(regex, options).({line, line_number}) do
+                                                        send_line(pid, file_path, options, {line, line_number})
+                                                end
+
+                                                grep_file_pointer(file_pointer, file_path, regex, pid, options, line_number + 1, line_start, line_end, finish_pid)
+                                end
+                end
+        end
+
+        defp count_lines(file_path) do
                 File.stream!(file_path, [:read, :compressed])
-                |> Stream.with_index
-                |> Stream.filter( line_matches(regex, options) )
-                |> Stream.map( &send_line(pid, file_path, options, &1) )
-                |> Stream.run
+                |> Enum.reduce(
+                        0,
+                        fn(_line, count) ->
+                                count + 1
+                        end
+                )
         end
 
         defp line_matches(regex, options) do
@@ -39,7 +109,7 @@ defmodule FileGrepper do
                 end
         end
 
-        defp send_line(pid, file_path, options, {line, index}) do
+        defp send_line(pid, file_path, options, {line, line_number}) do
                 filename_prefix =
                         if Enum.member?(options, {:filename, true}) do
                                 "#{file_path}:"
@@ -49,7 +119,7 @@ defmodule FileGrepper do
 
                 line_number_prefix =
                         if Enum.member?(options, {:line_number, true}) do
-                                "#{index + 1}:"
+                                "#{line_number}:"
                         else
                                 ""
                         end
@@ -81,7 +151,7 @@ defmodule FileGrepper.Process do
 end
 
 defmodule ProcessManager do
-        @max_processes 100
+        @max_processes 50
 
         def start(file_list, regex, options) do
                 manager = self()
